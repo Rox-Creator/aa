@@ -44,8 +44,10 @@ GUI.BladeTotal = 0
 GUI.ToggleKey = 0x72     -- default F3 (Windows VK code)
 GUI.ListeningForKey = false
 GUI.WasToggleDown = false
-GUI.WasEndDown = false
-GUI.EndKeyReady = false
+GUI.CloseKey = 0x23      -- default End — unloads the script
+GUI.ListeningForCloseKey = false
+GUI.WasCloseDown = false
+GUI.CloseKeyReady = false
 GUI.Running = true
 GUI.ResetConfirmAt = nil   -- tick() of last Reset Config click; second click within 3s confirms
 
@@ -441,9 +443,6 @@ local DEATHLOG = {
     NextPollAt     = 0,
     PermaThreshold = 60,    -- body must persist this many seconds before we treat the death as event-perma and webhook it
 }
-
--- Virtual key codes
-local VK_END = 0x23
 
 -- red toned down to a deep blood red so it doesn't fight the eye on
 -- every accent.
@@ -4203,69 +4202,80 @@ local function PageSettings()
     end
 
     -- ===== Controls card =====
-    local controlsH = 52 + Config.RowHeight + 14
+    local controlsH = 52 + 2 * Config.RowHeight + 14
     local controlsContentY = DrawCard(cardX, baseY, cardW, controlsH, "Controls", zb)
 
     local lx = cardX + Config.CardPad
     local rightEdge = cardX + cardW - Config.CardPad
 
-    local keyLabel = Drawing.new("Text")
-    keyLabel.Position = Vector2.new(lx, controlsContentY + 4)
-    keyLabel.Text = "Toggle Key"
-    keyLabel.Color = Colors.TextPrimary
-    keyLabel.Size = 14
-    keyLabel.Font = Drawing.Fonts.System
-    keyLabel.Center = false
-    keyLabel.Outline = false
-    keyLabel.Visible = true
-    keyLabel.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, keyLabel)
+    -- Renders one "Label .... [VK button]" row at rowY. `listening` is the
+    -- bool that flips on while we're waiting for the user to press a key;
+    -- `currentKey` is what the button label falls back to otherwise.
+    local function DrawKeyBindRow(rowY, label, listening, currentKey, onArm)
+        local lbl = Drawing.new("Text")
+        lbl.Position = Vector2.new(lx, rowY + 4)
+        lbl.Text = label
+        lbl.Color = Colors.TextPrimary
+        lbl.Size = 14
+        lbl.Font = Drawing.Fonts.System
+        lbl.Center = false
+        lbl.Outline = false
+        lbl.Visible = true
+        lbl.ZIndex = zb + 5
+        table.insert(GUI.ContentElements, lbl)
 
-    local btnW, btnH = 90, 24
-    local btnX = rightEdge - btnW
-    local btnY = controlsContentY + 2
+        local btnW, btnH = 90, 24
+        local btnX = rightEdge - btnW
+        local btnY = rowY + 2
 
-    local btnBg = Drawing.new("Square")
-    btnBg.Position = Vector2.new(btnX, btnY)
-    btnBg.Size = Vector2.new(btnW, btnH)
-    btnBg.Color = GUI.ListeningForKey and Color3.fromRGB(80, 40, 40) or Color3.fromRGB(30, 30, 36)
-    btnBg.Filled = true
-    btnBg.Corner = 5
-    btnBg.Visible = true
-    btnBg.ZIndex = zb + 3
-    table.insert(GUI.ContentElements, btnBg)
+        local btnBg = Drawing.new("Square")
+        btnBg.Position = Vector2.new(btnX, btnY)
+        btnBg.Size = Vector2.new(btnW, btnH)
+        btnBg.Color = listening and Color3.fromRGB(80, 40, 40) or Color3.fromRGB(30, 30, 36)
+        btnBg.Filled = true
+        btnBg.Corner = 5
+        btnBg.Visible = true
+        btnBg.ZIndex = zb + 3
+        table.insert(GUI.ContentElements, btnBg)
 
-    local btnBorder = Drawing.new("Square")
-    btnBorder.Position = Vector2.new(btnX, btnY)
-    btnBorder.Size = Vector2.new(btnW, btnH)
-    btnBorder.Color = GUI.ListeningForKey and Color3.fromRGB(180, 60, 60) or Colors.Border
-    btnBorder.Filled = false
-    btnBorder.Corner = 5
-    btnBorder.Thickness = 1
-    btnBorder.Visible = true
-    btnBorder.ZIndex = zb + 4
-    table.insert(GUI.ContentElements, btnBorder)
+        local btnBorder = Drawing.new("Square")
+        btnBorder.Position = Vector2.new(btnX, btnY)
+        btnBorder.Size = Vector2.new(btnW, btnH)
+        btnBorder.Color = listening and Color3.fromRGB(180, 60, 60) or Colors.Border
+        btnBorder.Filled = false
+        btnBorder.Corner = 5
+        btnBorder.Thickness = 1
+        btnBorder.Visible = true
+        btnBorder.ZIndex = zb + 4
+        table.insert(GUI.ContentElements, btnBorder)
 
-    local btnText = Drawing.new("Text")
-    btnText.Position = Vector2.new(btnX + btnW / 2, btnY + (btnH - 12) / 1.3 + 0.5)
-    btnText.Text = GUI.ListeningForKey and "..." or GetKeyName(GUI.ToggleKey)
-    btnText.Color = GUI.ListeningForKey and Color3.fromRGB(255, 100, 100) or Colors.Accent
-    btnText.Size = 12
-    btnText.Font = Drawing.Fonts.SystemBold
-    btnText.Center = true
-    btnText.Outline = false
-    btnText.Visible = true
-    btnText.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, btnText)
+        local btnText = Drawing.new("Text")
+        btnText.Position = Vector2.new(btnX + btnW / 2, btnY + (btnH - 12) / 1.3 + 0.5)
+        btnText.Text = listening and "..." or GetKeyName(currentKey)
+        btnText.Color = listening and Color3.fromRGB(255, 100, 100) or Colors.Accent
+        btnText.Size = 12
+        btnText.Font = Drawing.Fonts.SystemBold
+        btnText.Center = true
+        btnText.Outline = false
+        btnText.Visible = true
+        btnText.ZIndex = zb + 5
+        table.insert(GUI.ContentElements, btnText)
 
-    table.insert(GUI.Clickables, {
-        x = btnX, y = btnY,
-        w = btnW, h = btnH,
-        onClick = function()
-            GUI.ListeningForKey = true
-            CreateContent("Settings")
-        end
-    })
+        table.insert(GUI.Clickables, {
+            x = btnX, y = btnY, w = btnW, h = btnH,
+            onClick = function()
+                onArm()
+                CreateContent("Settings")
+            end,
+        })
+    end
+
+    DrawKeyBindRow(controlsContentY, "Toggle Key", GUI.ListeningForKey, GUI.ToggleKey, function()
+        GUI.ListeningForKey = true
+    end)
+    DrawKeyBindRow(controlsContentY + Config.RowHeight, "Close Key", GUI.ListeningForCloseKey, GUI.CloseKey, function()
+        GUI.ListeningForCloseKey = true
+    end)
 
     -- ===== Config card =====
     local configTopY = baseY + controlsH + 14
@@ -4291,7 +4301,7 @@ local function PageSettings()
             CreateContent("Settings")
             if GUI.HintText then
                 pcall(function()
-                    GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | End Unload"
+                    GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
                 end)
             end
         end)
@@ -4310,7 +4320,7 @@ local function PageSettings()
                 CreateContent("Settings")
                 if GUI.HintText then
                     pcall(function()
-                        GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | End Unload"
+                        GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
                     end)
                 end
             else
@@ -4485,7 +4495,7 @@ CreateContent = function(pageName)
 
     -- Update footer hint
     if GUI.HintText then
-        GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | End Unload"
+        GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
     end
 end
 
@@ -4763,7 +4773,7 @@ local function Init()
 
     local footerVersion = Drawing.new("Text")
     footerVersion.Position = Vector2.new(wx + 26 + GUI.FooterTextOffsetX, wy + wh - Config.FooterH + 7 + GUI.FooterTextOffsetY)
-    footerVersion.Text = "Requiem v1.0"
+    footerVersion.Text = "Requiem v2.0"
     footerVersion.Color = Colors.TextMuted
     footerVersion.Size = 12
     footerVersion.Font = Drawing.Fonts.System
@@ -4775,8 +4785,8 @@ local function Init()
 
     -- Footer right: key hints
     GUI.HintText = Drawing.new("Text")
-    GUI.HintText.Position = Vector2.new(wx + ww - 150 + GUI.FooterRightOffsetX, wy + wh - Config.FooterH + 7 + GUI.FooterRightOffsetY)
-    GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | End Unload"
+    GUI.HintText.Position = Vector2.new(wx + ww - 157 + GUI.FooterRightOffsetX, wy + wh - Config.FooterH + 7 + GUI.FooterRightOffsetY)
+    GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
     GUI.HintText.Color = Colors.TextMuted
     GUI.HintText.Size = 14
     GUI.HintText.Font = Drawing.Fonts.System
@@ -6611,19 +6621,21 @@ local function InputLoop()
     while GUI.Running do
         local toggleDown = iskeypressed(GUI.ToggleKey)
 
-        -- End key = unload (skip first frame to avoid false trigger)
-        local endDown = iskeypressed(VK_END)
-        if GUI.EndKeyReady then
-            if endDown and not GUI.WasEndDown then
+        -- Close key = unload (skip first frame so a held-down key from
+        -- before script launch doesn't immediately unload). The bound key
+        -- is user-configurable in Settings; default is End.
+        local closeDown = iskeypressed(GUI.CloseKey)
+        if GUI.CloseKeyReady then
+            if closeDown and not GUI.WasCloseDown then
                 UnloadScript()
                 return
             end
         else
-            if not endDown then
-                GUI.EndKeyReady = true
+            if not closeDown then
+                GUI.CloseKeyReady = true
             end
         end
-        GUI.WasEndDown = endDown
+        GUI.WasCloseDown = closeDown
 
         -- Player list toggle key
         local plKeyDown = iskeypressed(GUI.PlayerListKey)
@@ -6668,6 +6680,30 @@ local function InputLoop()
                     GUI.PlayerEspKey = vk
                     GUI.ListeningForPEKey = false
                     if GUI.Visible then CreateContent(GUI.SelectedPage) end
+                    task.wait(0.2)
+                    break
+                end
+            end
+        end
+
+        -- Close keybind listening (independent, always runs). After capture
+        -- we reset CloseKeyReady so the just-captured key — which is by
+        -- definition currently down — doesn't immediately unload.
+        if GUI.ListeningForCloseKey then
+            for _, vk in ipairs(VK_SCAN) do
+                if iskeypressed(vk) then
+                    GUI.CloseKey = vk
+                    GUI.ListeningForCloseKey = false
+                    GUI.CloseKeyReady = false
+                    GUI.WasCloseDown = true
+                    if GUI.SelectedPage == "Settings" then
+                        CreateContent("Settings")
+                    end
+                    if GUI.HintText then
+                        pcall(function()
+                            GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
+                        end)
+                    end
                     task.wait(0.2)
                     break
                 end
@@ -7420,7 +7456,7 @@ local function InputLoop()
         local interactive = GUI.Visible
             or GUI.PlayerListOpen or GUI.EnchantsOpen or GUI.RSDiffOpen
             or GUI.CounterVisible or GUI.HealthBarVisible
-            or GUI.ListeningForKey or GUI.ListeningForPLKey or GUI.ListeningForPEKey
+            or GUI.ListeningForKey or GUI.ListeningForPLKey or GUI.ListeningForPEKey or GUI.ListeningForCloseKey
             or GUI.Dragging or GUI.CounterDragging or GUI.HealthBarDragging
             or GUI.PlayerListDragging or GUI.EnchantsDragging or GUI.RSDiffDragging
             or next(GUI.MonitorBars) ~= nil
@@ -8704,6 +8740,7 @@ saveConfig = function()
     local data = {
         binds = {
             toggle     = GUI.ToggleKey,
+            close      = GUI.CloseKey,
             playerList = GUI.PlayerListKey,
             playerEsp  = GUI.PlayerEspKey,
         },
@@ -8769,6 +8806,7 @@ loadConfig = function()
 
     if type(data.binds) == "table" then
         if type(data.binds.toggle)     == "number" then GUI.ToggleKey     = data.binds.toggle     end
+        if type(data.binds.close)      == "number" then GUI.CloseKey      = data.binds.close      end
         if type(data.binds.playerList) == "number" then GUI.PlayerListKey = data.binds.playerList end
         if type(data.binds.playerEsp)  == "number" then GUI.PlayerEspKey  = data.binds.playerEsp  end
     end
@@ -8854,6 +8892,7 @@ end
 -- in-source default and writes that out as the new on-disk config.
 resetConfigToDefaults = function()
     GUI.ToggleKey     = 0x72   -- F3
+    GUI.CloseKey      = 0x23   -- End
     GUI.PlayerListKey = 0x63   -- Numpad3
     GUI.PlayerEspKey  = 0x70   -- F1
 
@@ -8935,7 +8974,7 @@ spawn(DmgIndicatorLoop)
 -- Expose GUI globally so debug.lua can access it
 pcall(function() getgenv().GUI = GUI end)
 
-print("Requiem loaded! Top-tab nav. Drag header to move. " .. GetKeyName(GUI.ToggleKey) .. " = toggle. End = unload.")
+print("Requiem loaded! " .. GetKeyName(GUI.ToggleKey) .. " = toggle. " .. GetKeyName(GUI.CloseKey) .. " = unload.")
 notify("Requiem", "Loaded! " .. GetKeyName(GUI.ToggleKey) .. " to toggle", 3)
 
 return GUI
