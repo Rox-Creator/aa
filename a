@@ -427,6 +427,12 @@ local CUBE_EDGES = {
 -- the DEATH LOG WEBHOOK ENGINE section.
 local deathFetchAllNow
 
+-- Forward-declared so the "Actors ESP" toggle (built far above the
+-- engine block) can fire an immediate scan when flipped on, instead
+-- of waiting for ESPLoop's ~1s scan tick. Body is assigned later in
+-- the ACTOR ESP ENGINE section.
+local actorEspScan
+
 local DEATHLOG = {
     Enabled       = false,
     -- Routing: ragdolls with Actor=true go to ActorWebhook (lore/NPC channel),
@@ -1213,6 +1219,22 @@ local function PageESPsElements()
     end)
     DrawCardToggleRow(rightX, colW, entityContentY + 3 * Config.RowHeight, "Actors ESP", ACTOR_ESP.Enabled, nil, zb, function()
         ACTOR_ESP.Enabled = not ACTOR_ESP.Enabled
+        -- Immediate scan so ragdolls already in Workspace get
+        -- registered the moment the user flips this on. Also count
+        -- what we found and notify so it's obvious where the bug
+        -- is when ESP doesn't show: no ragdolls / no actor ragdolls
+        -- / actor ragdolls but no live respawn.
+        if ACTOR_ESP.Enabled and actorEspScan then
+            pcall(actorEspScan)
+            local registered, alive = 0, 0
+            for _, data in pairs(ACTOR_ESP.Objects) do
+                registered = registered + 1
+                if data.liveModel then alive = alive + 1 end
+            end
+            notify("Requiem",
+                "Actors: " .. registered .. " registered, "
+                .. alive .. " alive (respawned)", 4)
+        end
         CreateContent(GUI.SelectedPage)
     end)
 
@@ -8388,12 +8410,18 @@ end
 -- ============================================================
 -- ACTOR ESP ENGINE
 -- ============================================================
--- See ACTOR_ESP config block at top of file for the data model. Brief:
--- we register an actor entry the first time we see a *_ragdoll model
--- in Workspace whose Actor attribute is true. Once registered, each
--- update we re-resolve the entry to either the live model or the
--- ragdoll (live wins), and draw a tag + name above it. When both refs
--- are gone we delete the entry and its Drawing handles.
+-- Hot-path design:
+--   * actorEspScan runs at the slow cadence (~1s) and is the ONLY
+--     place that walks Workspace. It indexes top-level children by
+--     name in a single pass, discovers new actor ragdolls, and
+--     refreshes every registered entry's liveModel / ragdollModel
+--     refs. No per-actor FindFirstChild calls.
+--   * actorEspUpdate runs every frame but only touches cached refs
+--     (with a cheap .Parent nil-check). It also caches the BasePart
+--     used for position lookup so we don't re-walk the model's
+--     rig each frame.
+--   * actorEspCleanup also runs at the slow cadence and trusts
+--     scan's freshly-refreshed refs — no extra Workspace lookups.
 
 local function actorEspRegisterByName(name)
     if ACTOR_ESP.Objects[name] then return end
@@ -8419,36 +8447,59 @@ local function actorEspRegisterByName(name)
     ACTOR_ESP.Objects[name] = {
         liveModel    = nil,
         ragdollModel = nil,
+        livePart     = nil,   -- cached BasePart used for position; invalidated on respawn
         prefixTag    = prefixTag,
         nameTag      = nameTag,
     }
 end
 
--- Walk Workspace once: any *_ragdoll Model with Actor=true gets its
--- base name registered. Already-registered names are no-ops.
-local function actorEspScan()
+-- One Workspace walk per scan tick — top-level only. Builds two
+-- indexes (live name → Model, ragdoll name → Model), registers any
+-- *_ragdoll with Actor=true we haven't seen before, and refreshes
+-- every registered entry's cached refs. NO recursion — descending
+-- into player characters / accessory trees was costing thousands of
+-- pcalls and locking the VM for a minute.
+actorEspScan = function()
     local kids
     pcall(function() kids = Workspace:GetChildren() end)
     if not kids then return end
 
+    local liveByName    = {}
+    local ragdollByName = {}
     for i = 1, #kids do
         local c = kids[i]
-        local cls
+        local nm, cls
+        pcall(function() nm = c.Name end)
         pcall(function() cls = c.ClassName end)
-        if cls == "Model" then
-            local nm
-            pcall(function() nm = c.Name end)
-            if type(nm) == "string" then
-                local len = #nm
-                if len > 8 and nm:sub(len - 7) == "_ragdoll" then
-                    if deathGetAttr(c, "Actor") == true then
-                        local baseName = nm:sub(1, len - 8)
-                        if baseName ~= "" then
-                            actorEspRegisterByName(baseName)
-                        end
-                    end
-                end
+        if type(nm) == "string" and cls == "Model" then
+            local len = #nm
+            if len > 8 and nm:sub(len - 7) == "_ragdoll" then
+                ragdollByName[nm] = c
+            else
+                liveByName[nm] = c
             end
+        end
+    end
+
+    -- Register any newly seen actor ragdolls.
+    for nm, model in pairs(ragdollByName) do
+        if deathGetAttr(model, "Actor") == true then
+            local baseName = nm:sub(1, #nm - 8)
+            if baseName ~= "" then
+                actorEspRegisterByName(baseName)
+            end
+        end
+    end
+
+    -- Refresh cached refs for every registered actor. If the live
+    -- model identity changed (respawn → new Model under the same name)
+    -- invalidate the cached part so the next update re-resolves.
+    for name, data in pairs(ACTOR_ESP.Objects) do
+        local prevLive = data.liveModel
+        data.liveModel    = liveByName[name]
+        data.ragdollModel = ragdollByName[name .. "_ragdoll"]
+        if data.liveModel ~= prevLive then
+            data.livePart = nil
         end
     end
 end
@@ -8456,6 +8507,32 @@ end
 local function actorEspHide(data)
     data.prefixTag.Visible = false
     data.nameTag.Visible = false
+end
+
+-- Resolve a BasePart on the live model whose Position we can read.
+-- Tries PrimaryPart, then the usual character anchors, then the first
+-- BasePart child. Returns the part (so the caller can cache it).
+local ACTOR_PART_NAMES = { "HumanoidRootPart", "UpperTorso", "Torso", "Head" }
+local function actorResolvePart(model)
+    local pp
+    pcall(function() pp = model.PrimaryPart end)
+    if pp then return pp end
+    for i = 1, #ACTOR_PART_NAMES do
+        local part
+        pcall(function() part = model:FindFirstChild(ACTOR_PART_NAMES[i]) end)
+        if part then return part end
+    end
+    local kids
+    pcall(function() kids = model:GetChildren() end)
+    if kids then
+        for i = 1, #kids do
+            local c = kids[i]
+            local pos
+            pcall(function() pos = c.Position end)
+            if pos then return c end
+        end
+    end
+    return nil
 end
 
 local function actorEspUpdate()
@@ -8468,23 +8545,33 @@ local function actorEspUpdate()
     if not playerPos then return end
 
     for name, data in pairs(ACTOR_ESP.Objects) do
-        -- Look up both possible Workspace instances. We only DRAW for
-        -- the live one — dead actors are covered by the (DEAD) ragdoll
-        -- ESP under the Players toggle. We still cache the ragdoll ref
-        -- so actorEspCleanup can tell when both are truly gone and the
-        -- entry can be removed.
-        local liveModel, ragdollModel
-        pcall(function() liveModel = Workspace:FindFirstChild(name) end)
-        pcall(function() ragdollModel = Workspace:FindFirstChild(name .. "_ragdoll") end)
-        data.liveModel    = liveModel
-        data.ragdollModel = ragdollModel
+        -- Cached ref check only — scan handles re-discovery at ~1s.
+        local liveModel = data.liveModel
+        if liveModel then
+            local valid = false
+            pcall(function() valid = liveModel.Parent ~= nil end)
+            if not valid then liveModel = nil end
+        end
 
         if not liveModel then
-            -- Either still dead or not respawned yet. Keep the entry —
-            -- a future respawn will re-light it without re-registering.
             actorEspHide(data)
         else
-            local pos = ragdollPosition(liveModel)
+            -- Cached part. Only re-resolve when the cached one lost its
+            -- parent (respawn invalidates it via scan; mid-frame Destroy
+            -- via this fallback).
+            local part = data.livePart
+            if part then
+                local valid = false
+                pcall(function() valid = part.Parent ~= nil end)
+                if not valid then part = nil end
+            end
+            if not part then
+                part = actorResolvePart(liveModel)
+                data.livePart = part
+            end
+
+            local pos
+            if part then pcall(function() pos = part.Position end) end
             if not pos then
                 actorEspHide(data)
             else
@@ -8522,22 +8609,14 @@ local function actorEspUpdate()
     end
 end
 
--- Drop entries where BOTH the live model and the ragdoll are gone
--- (or unparented). Re-checks Workspace once before deleting in case
--- the cached refs are stale.
+-- Drop entries where BOTH refs are gone. Trusts scan's just-refreshed
+-- refs — no extra Workspace lookups here.
 local function actorEspCleanup()
     for name, data in pairs(ACTOR_ESP.Objects) do
-        local hasLive    = data.liveModel    and data.liveModel.Parent
-        local hasRagdoll = data.ragdollModel and data.ragdollModel.Parent
-        if not hasLive and not hasRagdoll then
-            local live, ragdoll
-            pcall(function() live = Workspace:FindFirstChild(name) end)
-            pcall(function() ragdoll = Workspace:FindFirstChild(name .. "_ragdoll") end)
-            if not live and not ragdoll then
-                pcall(function() data.prefixTag:Remove() end)
-                pcall(function() data.nameTag:Remove() end)
-                ACTOR_ESP.Objects[name] = nil
-            end
+        if not data.liveModel and not data.ragdollModel then
+            pcall(function() data.prefixTag:Remove() end)
+            pcall(function() data.nameTag:Remove() end)
+            ACTOR_ESP.Objects[name] = nil
         end
     end
 end
