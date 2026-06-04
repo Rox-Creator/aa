@@ -3363,7 +3363,14 @@ TakeRSSnapshot = function()
                 if not RS_IGNORE_PATHS[path:lower()] then
                     snap[path] = { class = cls }
                     count = count + 1
-                    walk(c, path, depth + 1)
+                    -- Skip descending into Models — their internals
+                    -- (ValueBase values, sub-instances) churn frequently
+                    -- and we only care that the Model itself exists, not
+                    -- what's inside it. Folders / scripts / RS root still
+                    -- get walked normally.
+                    if cls ~= "Model" then
+                        walk(c, path, depth + 1)
+                    end
                 end
             end
         end
