@@ -8399,17 +8399,23 @@ deathFetchAllNow = function()
         local m = matches[i]
         local nm = m.name
         local reason, damage, category, timestamp, actor = deathReadAttrs(m.inst)
-        local msg = deathFormatMessage(nm, reason, damage, category, timestamp)
-        deathSendWebhook(msg, actor == true)
-        DEATHLOG.SentCount = DEATHLOG.SentCount + 1
-        DEATHLOG.Seen[nm] = true
-        DEATHLOG.Pending[nm] = nil
-        sent = sent + 1
-        local okT, t = pcall(os.time)
-        DEATHLOG.LastSent = {
-            name = deathCleanName(nm),
-            when = okT and t or 0,
-        }
+        -- Skip actors entirely — the manual fetch is for normal player
+        -- deaths only. Actors get their own dedicated webhook through
+        -- the live watcher; pulling them in here would double-post
+        -- bodies the user explicitly doesn't want in this channel.
+        if actor ~= true then
+            local msg = deathFormatMessage(nm, reason, damage, category, timestamp)
+            deathSendWebhook(msg, false)
+            DEATHLOG.SentCount = DEATHLOG.SentCount + 1
+            DEATHLOG.Seen[nm] = true
+            DEATHLOG.Pending[nm] = nil
+            sent = sent + 1
+            local okT, t = pcall(os.time)
+            DEATHLOG.LastSent = {
+                name = deathCleanName(nm),
+                when = okT and t or 0,
+            }
+        end
     end
     return sent
 end
