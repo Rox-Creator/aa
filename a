@@ -3330,6 +3330,96 @@ local RS_IGNORE_PATHS = {
     ["replicatedstorage.assets.chat"]             = true,
     ["replicatedstorage.assets.gear"]             = true,
     ["replicatedstorage.assets.meshes"]           = true,
+    ["replicatedstorage.assets.builder"]          = true,  -- map/decoration build assets
+    ["replicatedstorage.moonvfxassets"]           = true,  -- third-party VFX library
+}
+
+-- ClassNames the diff treats as noise. Two distinct rules:
+--
+--   RS_LEAF_CLASSES — node IS recorded, but we don't walk its children.
+--     Effects whose sub-instances get recreated when internal values
+--     change. The leaf itself still appears as ADD/DEL so you know one
+--     was added or removed; its guts don't spam fake entries.
+--
+--   RS_SKIP_CLASSES — node is NOT recorded at all, AND we don't walk it.
+--     Rigging / animation / constraint infrastructure (Motor6D, Weld,
+--     all *Constraint, etc.). These get rebuilt en masse whenever a rig
+--     loads — they aren't "content", they're engine plumbing. They have
+--     no business in a "what was added to the game" diff.
+local RS_LEAF_CLASSES = {
+    ParticleEmitter         = true,
+    Beam                    = true,
+    Trail                   = true,
+    Smoke                   = true,
+    Fire                    = true,
+    Sparkles                = true,
+    PointLight              = true,
+    SpotLight               = true,
+    SurfaceLight            = true,
+    Attachment              = true,
+    Sound                   = true,
+    Animation               = true,
+    Sky                     = true,
+    Clouds                  = true,
+    ColorCorrectionEffect   = true,
+    BloomEffect             = true,
+    BlurEffect              = true,
+    DepthOfFieldEffect      = true,
+    SunRaysEffect           = true,
+    Decal                   = true,
+    Texture                 = true,
+    SpecialMesh             = true,
+    BlockMesh               = true,
+    CylinderMesh            = true,
+    FileMesh                = true,
+    SurfaceAppearance       = true,
+}
+
+local RS_SKIP_CLASSES = {
+    -- Lighting effects (recreated by the engine on lighting changes)
+    Atmosphere             = true,
+
+    -- Joints / welds (rebuilt every rig swap or respawn)
+    Motor6D                = true,
+    Motor                  = true,
+    Weld                   = true,
+    ManualWeld             = true,
+    WeldConstraint         = true,
+    Snap                   = true,
+    Glue                   = true,
+    Rotate                 = true,
+    RotateV                = true,
+    RotateP                = true,
+
+    -- Constraints (animation-time infrastructure, churn constantly)
+    HingeConstraint        = true,
+    BallSocketConstraint   = true,
+    RodConstraint          = true,
+    RopeConstraint         = true,
+    SpringConstraint       = true,
+    SlidingBallConstraint  = true,
+    CylindricalConstraint  = true,
+    PrismaticConstraint    = true,
+    UniversalConstraint    = true,
+    LineForce              = true,
+    Torque                 = true,
+    VectorForce            = true,
+    AlignOrientation       = true,
+    AlignPosition          = true,
+    AngularVelocity        = true,
+    LinearVelocity         = true,
+    PlaneConstraint        = true,
+    NoCollisionConstraint  = true,
+
+    -- Animation data nodes (KeyframeSequences, bones, poses)
+    KeyframeSequence       = true,
+    Keyframe               = true,
+    KeyframeMarker         = true,
+    Pose                   = true,
+    NumberPose             = true,
+    AnimationConstraint    = true,
+    BoneAttachment         = true,
+    Bone                   = true,
 }
 
 TakeRSSnapshot = function()
@@ -3360,15 +3450,16 @@ TakeRSSnapshot = function()
             pcall(function() cls = c.ClassName end)
             if nm and cls then
                 local path = prefix .. "." .. nm
-                if not RS_IGNORE_PATHS[path:lower()] then
+                if not RS_IGNORE_PATHS[path:lower()] and not RS_SKIP_CLASSES[cls] then
                     snap[path] = { class = cls }
                     count = count + 1
-                    -- Skip descending into Models — their internals
-                    -- (ValueBase values, sub-instances) churn frequently
-                    -- and we only care that the Model itself exists, not
-                    -- what's inside it. Folders / scripts / RS root still
-                    -- get walked normally.
-                    if cls ~= "Model" then
+                    -- Don't descend into "leaf effect" classes — when
+                    -- their internal values change the engine recreates
+                    -- child instances, which would show up as fake ADDs
+                    -- of things that aren't really new. The leaf itself
+                    -- is still recorded, so adding/removing one of them
+                    -- still appears in the diff correctly.
+                    if not RS_LEAF_CLASSES[cls] then
                         walk(c, path, depth + 1)
                     end
                 end
