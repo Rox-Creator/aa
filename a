@@ -3334,45 +3334,25 @@ local RS_IGNORE_PATHS = {
     ["replicatedstorage.moonvfxassets"]           = true,  -- third-party VFX library
 }
 
--- ClassNames the diff treats as noise. Two distinct rules:
+-- ClassNames the diff treats specially.
 --
---   RS_LEAF_CLASSES — node IS recorded, but we don't walk its children.
---     Effects whose sub-instances get recreated when internal values
---     change. The leaf itself still appears as ADD/DEL so you know one
---     was added or removed; its guts don't spam fake entries.
+--   RS_WALK_CLASSES — the ONLY classes we descend into. Everything
+--     else (Models, BaseParts, Scripts, ModuleScripts, effects, etc.)
+--     gets recorded but treated as a leaf. The "what was added"
+--     question only needs to know that the file exists, not what
+--     internal rig parts / properties it has.
 --
---   RS_SKIP_CLASSES — node is NOT recorded at all, AND we don't walk it.
---     Rigging / animation / constraint infrastructure (Motor6D, Weld,
---     all *Constraint, etc.). These get rebuilt en masse whenever a rig
---     loads — they aren't "content", they're engine plumbing. They have
---     no business in a "what was added to the game" diff.
-local RS_LEAF_CLASSES = {
-    ParticleEmitter         = true,
-    Beam                    = true,
-    Trail                   = true,
-    Smoke                   = true,
-    Fire                    = true,
-    Sparkles                = true,
-    PointLight              = true,
-    SpotLight               = true,
-    SurfaceLight            = true,
-    Attachment              = true,
-    Sound                   = true,
-    Animation               = true,
-    Sky                     = true,
-    Clouds                  = true,
-    ColorCorrectionEffect   = true,
-    BloomEffect             = true,
-    BlurEffect              = true,
-    DepthOfFieldEffect      = true,
-    SunRaysEffect           = true,
-    Decal                   = true,
-    Texture                 = true,
-    SpecialMesh             = true,
-    BlockMesh               = true,
-    CylinderMesh            = true,
-    FileMesh                = true,
-    SurfaceAppearance       = true,
+--     Nested Folders chain freely — Folder A containing Folder B
+--     containing Folder C all get walked. The moment we hit a Model
+--     (or anything not in this set), we record it and stop.
+--
+--   RS_SKIP_CLASSES — node is NOT recorded at all, AND we don't walk
+--     it. Engine plumbing (Motor6D, Weld, all *Constraint, etc.) that
+--     pure containment-walks shouldn't ever surface anyway, but the
+--     skip list keeps these out of top-level results too.
+local RS_WALK_CLASSES = {
+    Folder        = true,
+    Configuration = true,  -- legacy folder-like container
 }
 
 local RS_SKIP_CLASSES = {
@@ -3453,13 +3433,14 @@ TakeRSSnapshot = function()
                 if not RS_IGNORE_PATHS[path:lower()] and not RS_SKIP_CLASSES[cls] then
                     snap[path] = { class = cls }
                     count = count + 1
-                    -- Don't descend into "leaf effect" classes — when
-                    -- their internal values change the engine recreates
-                    -- child instances, which would show up as fake ADDs
-                    -- of things that aren't really new. The leaf itself
-                    -- is still recorded, so adding/removing one of them
-                    -- still appears in the diff correctly.
-                    if not RS_LEAF_CLASSES[cls] then
+                    -- Only descend into containers (Folder / Configuration).
+                    -- Anything else — Model, BasePart, Script, ModuleScript,
+                    -- effects — gets recorded but treated as a leaf, so we
+                    -- never read inside its rig / property structure. Nested
+                    -- folders chain freely (Folder → Folder → Folder all
+                    -- walked), but the moment a Model appears, the recursion
+                    -- stops at it.
+                    if RS_WALK_CLASSES[cls] then
                         walk(c, path, depth + 1)
                     end
                 end
@@ -4144,16 +4125,78 @@ BuildRSDiffPanel = function()
             end
         end
 
-        -- Scrollbar (only if scrolling is needed)
+        -- Scrollbar with up/down arrow buttons (only if scroll is needed)
         if maxScroll > 0 then
             local sbW = 8
-            local sbX = px + pw - 18
-            local trackH = listH
+            local arrowW = 18
+            local arrowH = 18
+            local sbX = px + pw - 22
+            local arrowX = sbX + sbW / 2 - arrowW / 2
+
+            -- Up arrow (top of list)
+            local upY = listY
+            local upBg = Drawing.new("Square")
+            upBg.Position = Vector2.new(arrowX, upY); upBg.Size = Vector2.new(arrowW, arrowH)
+            upBg.Color = Color3.fromRGB(34, 34, 40); upBg.Filled = true
+            upBg.Corner = 3; upBg.Visible = true; upBg.ZIndex = zb + 5
+            table.insert(GUI.RSDiffElements, upBg)
+            local ucx, ucy = arrowX + arrowW / 2, upY + arrowH / 2
+            local upL1 = Drawing.new("Line")
+            upL1.From = Vector2.new(ucx, ucy - 4); upL1.To = Vector2.new(ucx - 5, ucy + 3)
+            upL1.Color = Colors.TextMuted; upL1.Thickness = 1.5
+            upL1.Visible = true; upL1.ZIndex = zb + 6
+            table.insert(GUI.RSDiffElements, upL1)
+            local upL2 = Drawing.new("Line")
+            upL2.From = Vector2.new(ucx, ucy - 4); upL2.To = Vector2.new(ucx + 5, ucy + 3)
+            upL2.Color = Colors.TextMuted; upL2.Thickness = 1.5
+            upL2.Visible = true; upL2.ZIndex = zb + 6
+            table.insert(GUI.RSDiffElements, upL2)
+            table.insert(GUI.RSDiffClickables, {
+                x = arrowX, y = upY, w = arrowW, h = arrowH,
+                onClick = function()
+                    if GUI.RSDiffScrollOffset > 0 then
+                        GUI.RSDiffScrollOffset = GUI.RSDiffScrollOffset - 1
+                        BuildRSDiffPanel()
+                    end
+                end
+            })
+
+            -- Down arrow (bottom of list)
+            local downY = listY + listH - arrowH
+            local dnBg = Drawing.new("Square")
+            dnBg.Position = Vector2.new(arrowX, downY); dnBg.Size = Vector2.new(arrowW, arrowH)
+            dnBg.Color = Color3.fromRGB(34, 34, 40); dnBg.Filled = true
+            dnBg.Corner = 3; dnBg.Visible = true; dnBg.ZIndex = zb + 5
+            table.insert(GUI.RSDiffElements, dnBg)
+            local dcx, dcy = arrowX + arrowW / 2, downY + arrowH / 2
+            local dnL1 = Drawing.new("Line")
+            dnL1.From = Vector2.new(dcx, dcy + 4); dnL1.To = Vector2.new(dcx - 5, dcy - 3)
+            dnL1.Color = Colors.TextMuted; dnL1.Thickness = 1.5
+            dnL1.Visible = true; dnL1.ZIndex = zb + 6
+            table.insert(GUI.RSDiffElements, dnL1)
+            local dnL2 = Drawing.new("Line")
+            dnL2.From = Vector2.new(dcx, dcy + 4); dnL2.To = Vector2.new(dcx + 5, dcy - 3)
+            dnL2.Color = Colors.TextMuted; dnL2.Thickness = 1.5
+            dnL2.Visible = true; dnL2.ZIndex = zb + 6
+            table.insert(GUI.RSDiffElements, dnL2)
+            table.insert(GUI.RSDiffClickables, {
+                x = arrowX, y = downY, w = arrowW, h = arrowH,
+                onClick = function()
+                    if GUI.RSDiffScrollOffset < maxScroll then
+                        GUI.RSDiffScrollOffset = GUI.RSDiffScrollOffset + 1
+                        BuildRSDiffPanel()
+                    end
+                end
+            })
+
+            -- Track between the arrows
+            local trackY = upY + arrowH + 4
+            local trackH = (downY - 4) - trackY
             local thumbH = math.max(24, trackH * maxRows / total)
-            local thumbY = listY + (GUI.RSDiffScrollOffset / maxScroll) * (trackH - thumbH)
+            local thumbY = trackY + (GUI.RSDiffScrollOffset / maxScroll) * (trackH - thumbH)
 
             local track = Drawing.new("Square")
-            track.Position = Vector2.new(sbX, listY); track.Size = Vector2.new(sbW, trackH)
+            track.Position = Vector2.new(sbX, trackY); track.Size = Vector2.new(sbW, trackH)
             track.Color = Color3.fromRGB(30, 30, 36); track.Filled = true
             track.Corner = 4; track.Visible = true; track.ZIndex = zb + 3
             table.insert(GUI.RSDiffElements, track)
@@ -4164,8 +4207,11 @@ BuildRSDiffPanel = function()
             thumb.Corner = 4; thumb.Visible = true; thumb.ZIndex = zb + 4
             table.insert(GUI.RSDiffElements, thumb)
 
+            -- Drag bounds match the track only (not the arrow buttons —
+            -- those are click-only), so dragging the thumb feels precise
+            -- instead of jumping when the cursor crosses an arrow.
             GUI._rsScrollTrack = {
-                x = sbX - 6, y = listY, w = sbW + 12, h = trackH,
+                x = sbX - 6, y = trackY, w = sbW + 12, h = trackH,
                 thumbH = thumbH, maxScroll = maxScroll,
             }
         else
