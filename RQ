@@ -6153,22 +6153,32 @@ end)()  -- /Requiem UI smooth engine
         end
     end)
 
-    -- Requiem's own logo. The forked lib ships a baked-in default (Verfall's) and the
-    -- CreateWindow `logo` option doesn't reliably override it — so force it via SetLogo too.
-    local REQUIEM_LOGO = "https://tr.rbxcdn.com/180DAY-feffde8d73bda422f53dd31fc43d4ae3/150/150/Image/Webp/noFilter"
+    -- Requiem logo. SetLogo has two footguns: (1) it only decodes PNG/JPEG, not WebP; (2) its
+    -- URL path caches by URL *length*, so Requiem's PNG URL (len 88) collides with Verfall's
+    -- (also 88) and loads Verfall's cached image. Fix: fetch the PNG ourselves and hand SetLogo
+    -- the raw BYTES -> its data path sets the image directly (no WebP, no length-cache, no
+    -- collision). Then re-assert for ~12s so the lib's async config-autoload can't restore a
+    -- stale (Verfall) logo over ours. Must be the /Png/ thumbnail (WebP bytes would be rejected).
+    local REQUIEM_LOGO = "https://tr.rbxcdn.com/180DAY-feffde8d73bda422f53dd31fc43d4ae3/150/150/Image/Png/noFilter"
     local window = Lib:CreateWindow({
         title     = "Requiem",
-        subtitle  = "AOTR",
+        subtitle  = "Bro you don't go 290 velo",
         size      = Vector2.new(640, 580),
         badge     = "v2",
         menuKey   = "f3",        -- F3 toggles the menu (matches the old bind)
         gameInput = "always",    -- never eat movement keys
-        logo      = REQUIEM_LOGO,
     })
     GUI._lib = Lib
     GUI._window = window
-    pcall(function() window:SetLogo(REQUIEM_LOGO) end)
-    pcall(function() Lib:SetLogo(REQUIEM_LOGO) end)
+    task.spawn(function()
+        local ok, png = pcall(function() return game:HttpGet(REQUIEM_LOGO) end)
+        if not (ok and type(png) == "string" and #png > 24
+            and string.byte(png, 1) == 0x89 and string.byte(png, 2) == 0x50) then return end
+        for _ = 1, 24 do   -- ~12s of re-asserts to beat the async config-autoload
+            pcall(function() window:SetLogo(png) end)
+            task.wait(0.5)
+        end
+    end)
     _G.MatchaCleanup = function() pcall(function() Lib:Destroy() end) end
     -- Library autosave re-serializes config to disk every ~1.2s (a stutter).
     -- Requiem persists via the Settings -> Save Config button instead.
