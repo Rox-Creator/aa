@@ -158,6 +158,15 @@ GUI.RSDiffScrollDragLastY = 0
 GUI.RSDiffStatus        = ""    -- text shown next to title
 GUI.RSOverwriteConfirmAt = nil  -- tick() of first overwrite click; 2nd click within 3s commits
 
+-- Velocity Indicator popup (Tools toggle). Reads the game's own PlayerGui.Velocity.Velocity.Speed
+-- label as the live max velo, then projects it through the Character-tab Max Velocity multiplier.
+GUI.VeloOpen            = false
+GUI.VeloX               = 40
+GUI.VeloY               = 300
+GUI.VeloMult            = 1.11   -- kept in sync with the Character tab's Max Velocity slider
+GUI.VeloPeak            = 0
+GUI.VeloPeakHiAt        = nil    -- os.clock() when peak first exceeded 400 (drives the 5s auto-reset)
+
 -- Monitor bars (per-player, from player list)
 GUI.MonitorBars = {}  -- { [playerName] = { elements={}, x=, y=, w=, h=, dragging=, dragOX=, dragOY= } }
 GUI.PlayerListKey = 0x63         -- default Numpad3 (VK_NUMPAD3)
@@ -5603,7 +5612,7 @@ local function hot(id,x,y,w,h,onClick)
     return av("h:"..id, over and 1 or 0, 16), over
 end
 
-local function window(key,x,y,w,h,title,subtitle,onClose)
+local function window(key,x,y,w,h,title,subtitle,onClose,noResize)
     local z=60
     shadow(x,y,w,h,z-4)
     rect(x,y,w,h,T.bg,z,0.95,8)
@@ -5617,11 +5626,13 @@ local function window(key,x,y,w,h,title,subtitle,onClose)
     if subtitle and subtitle~="" then txt(subtitle,x+34+tw(title,16)+12,y+11,12,T.muted,z+4) end
     -- (no X button — popups are closed from the menu toggle; the resize grip stays)
     drags[#drags+1]={x=x,y=y+R.yoff,w=w-20,h=34,key=key}
-    -- resize grip (bottom-right), like the original menu
-    local rhv=hot(key..":rs",x+w-20,y+h-20,18,18)
-    ln(x+w-16,y+h-7,x+w-7,y+h-16,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
-    ln(x+w-12,y+h-7,x+w-7,y+h-12,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
-    resizes[#resizes+1]={x=x+w-20,y=y+h-20+R.yoff,w=20,h=20,key=key}
+    if not noResize then
+        -- resize grip (bottom-right), like the original menu
+        local rhv=hot(key..":rs",x+w-20,y+h-20,18,18)
+        ln(x+w-16,y+h-7,x+w-7,y+h-16,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
+        ln(x+w-12,y+h-7,x+w-7,y+h-12,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
+        resizes[#resizes+1]={x=x+w-20,y=y+h-20+R.yoff,w=20,h=20,key=key}
+    end
     return x+14,y+44,w-28
 end
 
@@ -5900,6 +5911,69 @@ local function drawRS()
     R.fade=1; R.yoff=0
 end
 
+-- Velocity Indicator popup. PlayerGui.Velocity.Velocity.Speed IS the character's real velocity
+-- (verified: the Velocity route shows HumanoidRootPart.AssemblyLinearVelocity.Magnitude).
+-- The ODM top-speed cap is applied by a server-side momentum sim (dumped ~760 client scripts —
+-- GearMaxVelocityMultiplier is NOT read anywhere client-side, so there's no exact formula to copy).
+-- BUT your real runs fit a straight line: 235@x1.11, 267@x1.3, 330@x1.75  ->  top ~= VELO_B + VELO_M*mult.
+-- So EST. TOP VELOCITY uses that line (NOT peak*mult); your live PEAK validates it. If it drifts as you
+-- upgrade gear, just retune VELO_B / VELO_M. Also: live CURRENT; ignore <50 (walking); a peak >400 is a
+-- glitch and auto-clears after 5s; manual Reset.
+local VELO_B, VELO_M = 74, 147   -- intercept + slope fitted to your real velocity/multiplier runs
+local function drawVelo()
+    if not GUI.VeloOpen then anim.veloopen=0; return end
+    local op=av("veloopen",1,14); R.fade=op; R.yoff=(1-op)*12
+    local w,h=314,220
+    local x,y=GUI.VeloX,GUI.VeloY
+    local cx,cy,cw=window("velo",x,y,w,h,"Velocity",nil,function() GUI.VeloOpen=false end,true)
+
+    -- read the game's own live velocity readout (actual velocity)
+    local raw=0
+    pcall(function()
+        local pg=LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        local root=pg and pg:FindFirstChild("Velocity")
+        local frame=root and root:FindFirstChild("Velocity")
+        local speed=frame and frame:FindFirstChild("Speed")
+        if speed then local num=tostring(speed.Text or ""):match("[%d%.]+"); raw=tonumber(num) or 0 end
+    end)
+    local grappling = raw >= 50            -- below 50 = walking, not grappling — ignore
+    local cur = grappling and raw or 0
+    local mult = tonumber(GUI.VeloMult) or 1.11
+    if cur > (GUI.VeloPeak or 0) then GUI.VeloPeak = cur end
+    -- peak > 400 is a glitch spike (unreachable normally) — auto-clear it 5s after it appears
+    local nowc = os.clock()
+    if (GUI.VeloPeak or 0) > 400 then
+        if not GUI.VeloPeakHiAt then GUI.VeloPeakHiAt = nowc
+        elseif nowc - GUI.VeloPeakHiAt >= 5 then GUI.VeloPeak = 0; GUI.VeloPeakHiAt = nil end
+    else
+        GUI.VeloPeakHiAt = nil
+    end
+
+    local peak = GUI.VeloPeak or 0
+    local est = maxf(0, VELO_B + VELO_M * mult)   -- EST from the fitted line, NOT peak*mult
+
+    -- EST. TOP VELOCITY  (the "how much am I gonna go" headline)
+    txt(string.format("EST. TOP VELOCITY     x%.2f", mult), cx, cy, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
+    local es = string.format("~%.0f", est)
+    txt(es, cx, cy+14, 34, T.red, 64, false, Drawing.Fonts.SystemBold)
+    txt("velocity", cx+tw(es,34)+8, cy+36, 12, T.muted, 63)
+    ln(cx, cy+60, cx+cw, cy+60, T.soft, 62, 1, 0.4)
+
+    -- CURRENT (live) + PEAK (measured) + Reset
+    txt("CURRENT", cx, cy+68, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
+    if grappling then txt(string.format("%.0f", cur), cx, cy+82, 22, T.text, 64, false, Drawing.Fonts.SystemBold)
+    else txt("walking", cx, cy+84, 15, T.dim, 64, false, Drawing.Fonts.SystemBold) end
+
+    txt("PEAK", cx+cw*0.40, cy+68, 11, T.muted, 63, false, Drawing.Fonts.SystemBold)
+    txt(string.format("%.0f", peak), cx+cw*0.40, cy+82, 22, T.blue, 64, false, Drawing.Fonts.SystemBold)
+    button("veloreset", cx+cw-68, cy+80, 68, 26, "Reset", function() GUI.VeloPeak=0; GUI.VeloPeakHiAt=nil end, false, T.red)
+
+    -- the formula, spelled out so it's not a black box
+    txt(string.format("est = %d + %d x %.2f", VELO_B, VELO_M, mult), cx, cy+118, 12, T.green, 63, false, Drawing.Fonts.SystemBold)
+
+    R.fade=1; R.yoff=0
+end
+
 -- old Build*Panel are no longer renderers — the loop draws from GUI.*Open flags.
 BuildPlayerList = function() end
 BuildEnchantsPanel = function() end
@@ -5926,8 +6000,8 @@ task.spawn(function()
         elseif not down then R.resizeKey=nil end
 
         if R.dragKey and down then
-            local kx = R.dragKey=="pl" and "PlayerListX" or R.dragKey=="en" and "EnchantsX" or "RSDiffX"
-            local ky = R.dragKey=="pl" and "PlayerListY" or R.dragKey=="en" and "EnchantsY" or "RSDiffY"
+            local kx = R.dragKey=="pl" and "PlayerListX" or R.dragKey=="en" and "EnchantsX" or R.dragKey=="velo" and "VeloX" or "RSDiffX"
+            local ky = R.dragKey=="pl" and "PlayerListY" or R.dragKey=="en" and "EnchantsY" or R.dragKey=="velo" and "VeloY" or "RSDiffY"
             GUI[kx]=R.mx-R.dragOX; GUI[ky]=R.my-R.dragOY
         elseif not down then R.dragKey=nil end
         if R.scrollOff and down then
@@ -5942,7 +6016,7 @@ task.spawn(function()
         R._wasManip = manip
 
         beginFrame(); clicks={}; drags={}; scrolls={}; resizes={}
-        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS() end)
+        local ok,err=pcall(function() drawPlayers(); drawEnchants(); drawRS(); drawVelo() end)
         endFrame()
         if not ok then warn("[Requiem UI] "..tostring(err)) end
 
@@ -5960,8 +6034,8 @@ task.spawn(function()
                     R.scrollOff=s.key; R.scrollMax=s.maxScroll; R.scrollTrackH=s.track; R.scrollLastY=R.my; handled=true; break end end end
             if not handled then for i=#drags,1,-1 do local d=drags[i]
                 if R.mx>=d.x and R.mx<=d.x+d.w and R.my>=d.y and R.my<=d.y+d.h then
-                    local kx=d.key=="pl" and "PlayerListX" or d.key=="en" and "EnchantsX" or "RSDiffX"
-                    local ky=d.key=="pl" and "PlayerListY" or d.key=="en" and "EnchantsY" or "RSDiffY"
+                    local kx=d.key=="pl" and "PlayerListX" or d.key=="en" and "EnchantsX" or d.key=="velo" and "VeloX" or "RSDiffX"
+                    local ky=d.key=="pl" and "PlayerListY" or d.key=="en" and "EnchantsY" or d.key=="velo" and "VeloY" or "RSDiffY"
                     R.dragKey=d.key; R.dragOX=R.mx-GUI[kx]; R.dragOY=R.my-GUI[ky]; handled=true; break end end end
             if not handled then for i=#clicks,1,-1 do local c=clicks[i]
                 if R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end end
@@ -6205,6 +6279,7 @@ end)()  -- /Requiem UI smooth engine
             GUI.HealthBarVisible = v; BuildHealthBar()
         end)
         secInd:Toggle("Damage Indicator", GUI.DmgIndicatorEnabled, function(v) GUI.DmgIndicatorEnabled = v end)
+        secInd:Toggle("Velocity Indicator", GUI.VeloOpen, function(v) GUI.VeloOpen = v end)
     end)
 
     -- ===== Tab: Character  (ability config pins: Eradicate / Grapple / Velocity) =====
@@ -6229,54 +6304,84 @@ end)()  -- /Requiem UI smooth engine
         }
         local savedDefault = {}   -- your value BEFORE the first change (for Reset Default)
 
+        local cache = {}   -- key -> filtered getgc entries (so Apply/Reset never re-scan the whole GC)
         local function notif(t, m, d) pcall(notify, t, m, d or 3) end
-
-        -- getgc(key) -> keep only the real numeric config entry(ies)
-        local function collect(key)
-            local cfg = CFG[key]; if not cfg then return {}, nil end
-            local ok, entries = pcall(function() return getgc(key) end)
-            if not ok or type(entries) ~= "table" then return {}, nil end
-            local safe = {}
-            for _, e in pairs(entries) do
-                if type(e) == "table" and e.key == key and e.type == "number" then
-                    local v = tonumber(e.value)
-                    if v and v >= cfg.lo and v <= cfg.hi then safe[#safe + 1] = e end
-                end
-            end
-            return safe, (safe[1] and tonumber(safe[1].value)) or nil
+        local function keep(cfg, e)   -- is this getgc entry the real numeric config value (not a hash decoy)?
+            if type(e) ~= "table" or e.type ~= "number" then return false end
+            local v = tonumber(e.value); return v ~= nil and v >= cfg.lo and v <= cfg.hi
         end
 
-        -- write `value` to `key`; capture the pre-change value the first time we touch it
+        -- ONE getgc sweep for EVERY key, filtered + cached. getgc scans the whole Lua GC (slow),
+        -- so sweeping once instead of once-per-key on every apply is what removes the multi-second freeze.
+        local function warm()
+            local keys = {}
+            for k in pairs(CFG) do keys[#keys + 1] = k; if not cache[k] then cache[k] = {} end end
+            local ok, entries = pcall(function() return getgc(keys) end)   -- getgc accepts a key LIST
+            if not ok or type(entries) ~= "table" then return false end
+            for _, e in pairs(entries) do
+                local cfg = e and CFG[e.key]
+                if cfg and keep(cfg, e) then
+                    local c = cache[e.key]; c[#c + 1] = e
+                    if savedDefault[e.key] == nil then savedDefault[e.key] = tonumber(e.value) end
+                end
+            end
+            return true
+        end
+
+        -- cached entries for a key; lazily sweep just that one key if the cache is still empty
+        local function entriesFor(key)
+            if cache[key] and #cache[key] > 0 then return cache[key] end
+            local cfg = CFG[key]; if not cfg then return {} end
+            local ok, entries = pcall(function() return getgc(key) end)
+            if not ok or type(entries) ~= "table" then return {} end
+            local safe = {}
+            for _, e in pairs(entries) do
+                if e and e.key == key and keep(cfg, e) then
+                    safe[#safe + 1] = e
+                    if savedDefault[key] == nil then savedDefault[key] = tonumber(e.value) end
+                end
+            end
+            cache[key] = safe
+            return safe
+        end
+
+        -- write `value` to `key` using the cached entries (fast applygc; no GC re-scan)
         local function apply(key, value)
             if type(getgc) ~= "function" or type(applygc) ~= "function" then return false end
-            local safe, cur = collect(key)
+            local safe = entriesFor(key)
             if #safe == 0 then return false end
-            if savedDefault[key] == nil then savedDefault[key] = cur end
+            if savedDefault[key] == nil then savedDefault[key] = tonumber(safe[1].value) end
             return (pcall(function() applygc(safe, key, value) end))
         end
 
         local function reset(key)
             if savedDefault[key] ~= nil then return apply(key, savedDefault[key]) end
-            local _, cur = collect(key)               -- never changed: current IS your default
-            savedDefault[key] = cur or CFG[key].fb
+            entriesFor(key)                           -- never changed: this captures your live current as default
             return true
         end
 
+        -- Apply/Reset run in a background task so even the first (cache-warming) sweep can't freeze the click.
         local function applyMany(title, keys, vals)
-            local okAll = true
-            for i, k in ipairs(keys) do if not apply(k, vals[i]) then okAll = false end end
-            if okAll then notif(title, "Applied", 3) else notif(title, "Failed - join a round first", 4) end
+            task.spawn(function()
+                local okAll = true
+                for i, k in ipairs(keys) do if not apply(k, vals[i]) then okAll = false end end
+                if okAll then notif(title, "Applied", 3) else notif(title, "Failed - join a round first", 4) end
+            end)
         end
         local function resetMany(title, keys)
-            for _, k in ipairs(keys) do reset(k) end
-            notif(title, "Restored your defaults", 3)
+            task.spawn(function()
+                for _, k in ipairs(keys) do reset(k) end
+                notif(title, "Restored your defaults", 3)
+            end)
         end
+
+        task.spawn(function() pcall(warm) end)        -- warm the cache once, in the background
 
         -- ---------- Eradicate (Sentinel chain capstone) ----------
         local secEr = tab:Section("Eradicate", "Left", "Chain kills / lockout")
         local erKills, erLock = CFG.ERADICATE_CHAIN_MAX_KILLS.fb, CFG.ERADICATE_CHAIN_LOCKOUT_SEC.fb
-        secEr:Slider("Chain Max Kills", erKills, 1, 2, 50, "", function(v) erKills = math.floor(tonumber(v) or erKills) end)
-        secEr:Slider("Chain Lockout", erLock, 1, 1, 200, "s", function(v) erLock = math.floor(tonumber(v) or erLock) end)
+        secEr:Slider("Chain Max Kills", erKills, 1, 3, 50, "", function(v) erKills = math.floor(tonumber(v) or erKills) end)
+        secEr:Slider("Chain Lockout", erLock, 1, 1, 120, "s", function(v) erLock = math.floor(tonumber(v) or erLock) end)
         secEr:Button("Apply Eradicate", function()
             applyMany("Eradicate", { "ERADICATE_CHAIN_MAX_KILLS", "ERADICATE_CHAIN_LOCKOUT_SEC" }, { erKills, erLock })
         end)
@@ -6302,7 +6407,8 @@ end)()  -- /Requiem UI smooth engine
         -- ---------- Velocity (ODM speed build-up) ----------
         local secVe = tab:Section("Velocity", "Right", "ODM speed build-up")
         local veMax, veInc, veDec = CFG.GearMaxVelocityMultiplier.fb, CFG.GearVelocityIncreaseRate.fb, CFG.GearVelocityDecayRate.fb
-        secVe:Slider("Max Velocity", veMax, 0.01, 0.5, 3, "x", function(v) veMax = tonumber(v) or veMax end)
+        GUI.VeloMult = veMax   -- feed the Tools "Velocity Indicator" popup
+        secVe:Slider("Max Velocity", veMax, 0.01, 0.5, 3, "x", function(v) veMax = tonumber(v) or veMax; GUI.VeloMult = veMax end)
         secVe:Slider("Increase Rate", veInc, 0.05, 0.5, 5, "x", function(v) veInc = tonumber(v) or veInc end)
         secVe:Slider("Decay Rate", veDec, 0.05, 0, 3, "x", function(v) veDec = tonumber(v) or veDec end)
         secVe:Button("Apply Velocity", function()
@@ -6312,46 +6418,7 @@ end)()  -- /Requiem UI smooth engine
             resetMany("Velocity", { "GearMaxVelocityMultiplier", "GearVelocityIncreaseRate", "GearVelocityDecayRate" })
         end)
 
-        -- ---------- Velocity indicator (live) ----------
-        -- Live speed from HumanoidRootPart position-delta (robust; Matcha doesn't reliably
-        -- expose AssemblyLinearVelocity). Shows your projected top-speed gain vs default.
-        local VEL = { speed = 0, peak = 0, lastPos = nil, lastT = 0 }
-        task.spawn(function()
-            while GUI.Running do
-                pcall(function()
-                    local ch = LocalPlayer and LocalPlayer.Character
-                    local hrp = ch and (ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("Torso") or ch.PrimaryPart)
-                    if hrp then
-                        local p, now = hrp.Position, os.clock()
-                        if VEL.lastPos then
-                            local dt = now - VEL.lastT
-                            if dt > 0.0001 then
-                                local s = (p - VEL.lastPos).Magnitude / dt
-                                if s < 8000 then   -- ignore teleport spikes
-                                    VEL.speed = VEL.speed + (s - VEL.speed) * 0.4
-                                    if VEL.speed > VEL.peak then VEL.peak = VEL.speed end
-                                end
-                            end
-                        end
-                        VEL.lastPos, VEL.lastT = p, now
-                    else
-                        VEL.lastPos = nil
-                    end
-                end)
-                task.wait(0.1)
-            end
-        end)
-
-        local secInd = tab:Section("Velocity Indicator", "Right", "How much more speed you'll gain")
-        secInd:Label(function()
-            local base = savedDefault.GearMaxVelocityMultiplier or CFG.GearMaxVelocityMultiplier.fb
-            local gain = (base > 0) and ((veMax / base - 1) * 100) or 0
-            return string.format("Top-speed cap  x%.2f   (%+d%% vs default x%.2f)", veMax, math.floor(gain + 0.5), base)
-        end)
-        secInd:Label(function()
-            return string.format("Live speed  %d studs/s      Peak  %d", math.floor(VEL.speed + 0.5), math.floor(VEL.peak + 0.5))
-        end)
-        secInd:Button("Reset Peak", function() VEL.peak = 0 end)
+        secVe:Label(function() return "Live projection  ->  Tools  ->  Velocity Indicator" end)
     end)
 
     -- ===== Tab: Logs =====
@@ -6383,17 +6450,6 @@ end)()  -- /Requiem UI smooth engine
     -- ===== Settings tab (built-in) =====
     tabBuild(function()
         local setTab = window:AddSettingsTab("cog")
-
-        local secCfg = setTab:Section("Config", "Left", "Save / load / reset")
-        secCfg:Button("Save Config", function()
-            pcall(saveConfig); notify("Config", "Saved to " .. CONFIG_PATH, 2)
-        end)
-        secCfg:Button("Load Config", function()
-            pcall(loadConfig); notify("Config", "Loaded — reload script to refresh the menu", 4)
-        end)
-        secCfg:Button("Reset Config", function()
-            pcall(resetConfigToDefaults); notify("Config", "Reset — reload script to refresh the menu", 4)
-        end):SetRisk()
 
         -- Appearance: Requiem owns the accent + opacity (the lib doesn't expose its
         -- live theme), and the driver above pushes them to BOTH the menu and the popups.
